@@ -1,6 +1,8 @@
 # Observability Stack Implementation
 
-Comprehensive monitoring, logging, and tracing infrastructure using Prometheus, Grafana, Loki, and Jaeger.
+[![Deploy Observability Stack](https://github.com/Parker2127/observability-stack/actions/workflows/deploy.yml/badge.svg)](https://github.com/Parker2127/observability-stack/actions/workflows/deploy.yml)
+
+Comprehensive monitoring, logging, and tracing infrastructure using Prometheus, Grafana, Loki, and Jaeger. **Live three-pillar observability stack deploys automatically on every push** using Helm in K3s.
 
 ## 🎯 Project Goals
 

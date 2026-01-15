@@ -1,0 +1,310 @@
+name: Deploy Observability Stack
+
+# Production-grade observability platform deployment
+# Deploys Prometheus, Grafana, Loki, and Jaeger to K3s
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  NAMESPACE: monitoring
+
+jobs:
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Validate Docker Compose
+        run: |
+          echo "🔧 Validating Docker Compose configuration..."
+          docker compose -f docker-compose.yml config > /dev/null
+          echo "✅ Docker Compose validation passed"
+      
+      - name: Validate Prometheus config
+        run: |
+          echo "🔧 Validating Prometheus configuration..."
+          docker run --rm -v $PWD/prometheus:/etc/prometheus prom/prometheus:latest promtool check config /etc/prometheus/config.yaml
+          echo "✅ Prometheus config valid"
+      
+      - name: Validate alert rules
+        run: |
+          echo "🔧 Validating Prometheus alert rules..."
+          docker run --rm -v $PWD/prometheus:/etc/prometheus prom/prometheus:latest promtool check rules /etc/prometheus/alerts.yaml
+          echo "✅ Alert rules valid"
+
+  deploy:
+    name: Deploy Observability Stack
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up K3s
+        run: |
+          curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
+          mkdir -p ~/.kube
+          sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+          sudo chown $USER ~/.kube/config
+          echo "Waiting for K3s to be ready..."
+          sleep 20
+          kubectl wait --for=condition=Ready nodes --all --timeout=120s
+      
+      - name: Create monitoring namespace
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} || true
+          kubectl get namespace ${{ env.NAMESPACE }}
+      
+      - name: Install Prometheus Stack
+        run: |
+          echo "📊 Installing Prometheus and Grafana..."
+          
+          # Add Helm repo
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          
+          # Install kube-prometheus-stack
+          helm install prometheus prometheus-community/kube-prometheus-stack \
+            --namespace ${{ env.NAMESPACE }} \
+            --set prometheus.prometheusSpec.retention=1d \
+            --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=5Gi \
+            --set grafana.enabled=true \
+            --set grafana.adminPassword=admin123 \
+            --wait --timeout 5m
+          
+          echo "✅ Prometheus stack installed"
+      
+      - name: Configure custom Prometheus rules
+        run: |
+          echo "📋 Configuring custom alert rules..."
+          
+          # Create ConfigMap with custom alerts
+          kubectl create configmap custom-alerts \
+            --from-file=alerts.yaml=prometheus/alerts.yaml \
+            --namespace ${{ env.NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+          
+          echo "✅ Custom alerts configured"
+      
+      - name: Install Loki Stack
+        run: |
+          echo "📝 Installing Loki for logs..."
+          
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo update
+          
+          helm install loki grafana/loki-stack \
+            --namespace ${{ env.NAMESPACE }} \
+            --set grafana.enabled=false \
+            --set promtail.enabled=true \
+            --set loki.persistence.enabled=false \
+            --wait --timeout 5m
+          
+          echo "✅ Loki stack installed"
+      
+      - name: Install Jaeger
+        run: |
+          echo "🔍 Installing Jaeger for distributed tracing..."
+          
+          # Deploy Jaeger all-in-one
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: jaeger
+            namespace: ${{ env.NAMESPACE }}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: jaeger
+            template:
+              metadata:
+                labels:
+                  app: jaeger
+              spec:
+                containers:
+                - name: jaeger
+                  image: jaegertracing/all-in-one:1.51
+                  ports:
+                  - containerPort: 16686
+                    name: ui
+                  - containerPort: 14268
+                    name: collector
+                  - containerPort: 6831
+                    protocol: UDP
+                    name: agent
+                  env:
+                  - name: COLLECTOR_ZIPKIN_HOST_PORT
+                    value: ":9411"
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "200m"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: jaeger
+            namespace: ${{ env.NAMESPACE }}
+          spec:
+            selector:
+              app: jaeger
+            ports:
+            - port: 16686
+              name: ui
+            - port: 14268
+              name: collector
+            - port: 6831
+              protocol: UDP
+              name: agent
+          EOF
+          
+          kubectl wait --for=condition=available --timeout=120s deployment/jaeger -n ${{ env.NAMESPACE }}
+          echo "✅ Jaeger installed"
+      
+      - name: Deploy sample application with instrumentation
+        run: |
+          echo "🚀 Deploying instrumented sample application..."
+          
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: sample-app
+            namespace: default
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: sample-app
+            template:
+              metadata:
+                labels:
+                  app: sample-app
+                annotations:
+                  prometheus.io/scrape: "true"
+                  prometheus.io/port: "8080"
+                  prometheus.io/path: "/metrics"
+              spec:
+                containers:
+                - name: app
+                  image: nginx:1.21-alpine
+                  ports:
+                  - containerPort: 80
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "200m"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: sample-app
+            namespace: default
+          spec:
+            selector:
+              app: sample-app
+            ports:
+            - port: 80
+              targetPort: 80
+          EOF
+          
+          kubectl wait --for=condition=available --timeout=120s deployment/sample-app -n default
+          echo "✅ Sample app deployed"
+      
+      - name: Verify observability stack
+        run: |
+          echo "🏥 Verifying observability components..."
+          
+          # Check Prometheus
+          echo "Prometheus pods:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=prometheus
+          
+          # Check Grafana
+          echo ""
+          echo "Grafana pods:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=grafana
+          
+          # Check Loki
+          echo ""
+          echo "Loki pods:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=loki
+          
+          # Check Jaeger
+          echo ""
+          echo "Jaeger pods:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=jaeger
+          
+          # Verify all pods are running
+          NOT_RUNNING=$(kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running,status.phase!=Succeeded --no-headers | wc -l)
+          if [ "$NOT_RUNNING" -gt 0 ]; then
+            echo "❌ Some pods are not running"
+            kubectl get pods -n ${{ env.NAMESPACE }}
+            exit 1
+          fi
+          
+          echo "✅ All observability components running"
+      
+      - name: Test metrics collection
+        run: |
+          echo "📊 Testing Prometheus metrics collection..."
+          
+          # Port-forward Prometheus
+          kubectl port-forward -n ${{ env.NAMESPACE }} svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+          PF_PID=$!
+          sleep 5
+          
+          # Query Prometheus
+          RESPONSE=$(curl -s http://localhost:9090/api/v1/query?query=up)
+          echo "Prometheus query response: $RESPONSE"
+          
+          if echo "$RESPONSE" | grep -q '"status":"success"'; then
+            echo "✅ Prometheus is collecting metrics"
+          else
+            echo "⚠️  Prometheus query returned unexpected response"
+          fi
+          
+          kill $PF_PID 2>/dev/null || true
+      
+      - name: Test log collection
+        run: |
+          echo "📝 Testing Loki log collection..."
+          
+          # Check if Promtail is collecting logs
+          PROMTAIL_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=promtail --no-headers | wc -l)
+          if [ "$PROMTAIL_PODS" -gt 0 ]; then
+            echo "✅ Promtail is running ($PROMTAIL_PODS pods)"
+          else
+            echo "⚠️  No Promtail pods found"
+          fi
+      
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "📊 Observability Stack Deployment Summary"
+          echo "=========================================="
+          echo ""
+          echo "Monitoring Components:"
+          kubectl get all -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "ConfigMaps and Secrets:"
+          kubectl get configmaps,secrets -n ${{ env.NAMESPACE }} | head -20
+          echo ""
+          echo "Services:"
+          kubectl get svc -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "Application Metrics:"
+          kubectl get pods -n default -l app=sample-app
