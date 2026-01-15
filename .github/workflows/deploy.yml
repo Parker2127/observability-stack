@@ -29,13 +29,13 @@ jobs:
       - name: Validate Prometheus config
         run: |
           echo "🔧 Validating Prometheus configuration..."
-          docker run --rm -v $PWD/prometheus:/etc/prometheus prom/prometheus:latest promtool check config /etc/prometheus/config.yaml
+          docker run --rm -v $PWD/prometheus:/prometheus prom/prometheus:latest promtool check config /prometheus/config.yaml
           echo "✅ Prometheus config valid"
       
       - name: Validate alert rules
         run: |
           echo "🔧 Validating Prometheus alert rules..."
-          docker run --rm -v $PWD/prometheus:/etc/prometheus prom/prometheus:latest promtool check rules /etc/prometheus/alerts.yaml
+          docker run --rm -v $PWD/prometheus:/prometheus prom/prometheus:latest promtool check rules /prometheus/alerts.yaml
           echo "✅ Alert rules valid"
 
   deploy:
