@@ -265,7 +265,7 @@ MIT License
 
 I design, build, and operate production-inspired cloud platforms that improve reliability and reduce deployment risk.
 
-- 🌐 [Portfolio](https://parker2127.github.io/portfolio)
+- 🌐 [Portfolio](https://parker2127.github.io/portfolio/)
 - 💼 [LinkedIn](https://linkedin.com/in/shrikarkaduluri)
 - 🐙 [GitHub](https://github.com/Parker2127)
 
